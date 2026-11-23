@@ -20,21 +20,9 @@ import { playNotificationChime } from './utils/audioAlert';
 export default function App() {
   const [barangays, setBarangays] = useState<BarangaySchedule[]>(QC_BARANGAYS);
 
-  // Multi-tenant RBAC Session State: RESIDENT | OFFICIAL | DRIVER
-  const [authSession, setAuthSession] = useState<AuthSession | null>(() => {
-    try {
-      const saved = localStorage.getItem('qc_auth_session');
-      if (saved) return JSON.parse(saved);
-      // Legacy session backward compatibility
-      const legacy = localStorage.getItem('qc_active_resident');
-      if (legacy) {
-        return { role: 'RESIDENT', user: JSON.parse(legacy) } as AuthSession;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  });
+  // Multi-tenant RBAC Session & Bearer Token State (held strictly in memory)
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(null);
 
   // Official portal subtab navigation: Dispatcher CRUD table | Notification logs
   const [officialTab, setOfficialTab] = useState<'dispatcher' | 'notifications'>('dispatcher');
@@ -132,20 +120,10 @@ export default function App() {
       });
   }, []);
 
-  // Sync authSession to LocalStorage
-  const handleSessionChange = useCallback((session: AuthSession | null) => {
+  // Sync authSession & token in memory
+  const handleSessionChange = useCallback((session: AuthSession | null, token: string | null = null) => {
     setAuthSession(session);
-    if (session) {
-      localStorage.setItem('qc_auth_session', JSON.stringify(session));
-      if (session.role === 'RESIDENT') {
-        localStorage.setItem('qc_active_resident', JSON.stringify(session.user));
-      } else {
-        localStorage.removeItem('qc_active_resident');
-      }
-    } else {
-      localStorage.removeItem('qc_auth_session');
-      localStorage.removeItem('qc_active_resident');
-    }
+    setAuthToken(session ? token : null);
   }, []);
 
   // Real-Time Server-Sent Events (SSE) Pub/Sub Listener & 1-Minute Watchdog Receiver
@@ -214,7 +192,7 @@ export default function App() {
           // If driver is currently active in session and matches this driver, sync driver state
           if (authSession?.role === 'DRIVER' && authSession.user.id === driver?.id) {
             const updatedDriver = { ...authSession.user, currentStatus: 'DELAYED' as const, slaBreachDetected: true };
-            handleSessionChange({ role: 'DRIVER', user: updatedDriver });
+            setAuthSession({ role: 'DRIVER', user: updatedDriver });
           }
         } catch (err) {
           console.error('Error handling SLA_VIOLATION event:', err);
@@ -237,7 +215,7 @@ export default function App() {
 
           if (authSession?.role === 'DRIVER' && authSession.user.id === driver?.id) {
             const updatedDriver = { ...authSession.user, currentStatus: 'ON_SITE_COLLECTING' as const, slaBreachDetected: false };
-            handleSessionChange({ role: 'DRIVER', user: updatedDriver });
+            setAuthSession({ role: 'DRIVER', user: updatedDriver });
           }
         } catch (err) {
           console.error('Error handling DRIVER_ARRIVED event:', err);
@@ -260,7 +238,7 @@ export default function App() {
           }
 
           if (authSession?.role === 'DRIVER' && authSession.user.id === driver?.id) {
-            handleSessionChange({ role: 'DRIVER', user: driver });
+            setAuthSession({ role: 'DRIVER', user: driver });
           }
         } catch (err) {
           console.error('Error handling DRIVER_ETA_UPDATED event:', err);
@@ -273,7 +251,7 @@ export default function App() {
           const payload = JSON.parse(e.data);
           const { driver } = payload;
           if (authSession?.role === 'DRIVER' && authSession.user.id === driver?.id) {
-            handleSessionChange({ role: 'DRIVER', user: driver });
+            setAuthSession({ role: 'DRIVER', user: driver });
           }
         } catch (err) {
           console.error('Error handling DRIVER_INCIDENT event:', err);
@@ -329,7 +307,7 @@ export default function App() {
 
   // Resident Pub/Sub Subscription Toggle
   const handleToggleSubscription = useCallback(
-    (barangayId: string) => {
+    async (barangayId: string) => {
       if (!authSession || authSession.role !== 'RESIDENT') return;
       const resident = authSession.user as ResidentUser;
 
@@ -343,7 +321,18 @@ export default function App() {
         subscribedBarangayIds: updatedIds,
       };
 
-      handleSessionChange({ role: 'RESIDENT', user: updatedResident });
+      setAuthSession({ role: 'RESIDENT', user: updatedResident });
+
+      if (authToken) {
+        fetch('/api/resident/subscriptions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({ barangayId }),
+        }).catch(() => {});
+      }
 
       // Immediate confirmation alert if subscribing
       if (!isSubscribed) {
@@ -355,15 +344,15 @@ export default function App() {
             barangayName: target.name,
             district: target.district,
             type: target.status === 'DELAYED' ? 'DELAY_ALERT' : 'SCHEDULED_REMINDER',
-            title: target.status === 'DELAYED' 
+            title: target.status === 'DELAYED'
               ? `⚠️ Subscribed to Delayed Pickup Alerts: Brgy. ${target.name}`
               : `🔔 Subscribed to Alerts: Brgy. ${target.name}`,
             scheduledDate: target.status === 'DELAYED' && target.currentDelay ? target.currentDelay.rescheduledDate : target.nextScheduledDate,
             scheduledTime: target.status === 'DELAYED' && target.currentDelay ? target.currentDelay.rescheduledTime : target.nextScheduledTime,
             causeOfDelay: target.currentDelay?.cause,
             delayCategory: target.currentDelay?.category,
-            advisory: target.currentDelay 
-              ? target.currentDelay.advisoryNote 
+            advisory: target.currentDelay
+              ? target.currentDelay.advisoryNote
               : `You are now subscribed to real-time garbage truck arrival updates and delay announcements for ${target.name}.`,
             timestamp: 'Just now',
             isRead: false,
@@ -376,17 +365,19 @@ export default function App() {
         }
       }
     },
-    [authSession, barangays, handleSessionChange]
+    [authSession, authToken, barangays]
   );
 
-  // --- TRUCK DRIVER GATEWAY ACTIONS ---
+  // --- TRUCK DRIVER ACTIONS ---
 
-  // 1. Driver Arrive Check-in
   const handleDriverArrive = async (driverId: string, barangayId: string) => {
     try {
       const res = await fetch('/api/driver/arrive', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify({ driverId, barangayId }),
       });
 
@@ -394,7 +385,7 @@ export default function App() {
         const result = await res.json();
         if (result.success) {
           if (authSession?.role === 'DRIVER') {
-            handleSessionChange({ role: 'DRIVER', user: result.driver });
+            setAuthSession({ role: 'DRIVER', user: result.driver });
           }
           setBarangays((prev) =>
             prev.map((b) => (b.id === barangayId ? { ...b, status: 'IN_PROGRESS' as const, currentDelay: undefined } : b))
@@ -405,16 +396,18 @@ export default function App() {
         }
       }
     } catch (e) {
-      console.debug('Driver arrive fallback:', e);
+      console.debug('Driver arrive error:', e);
     }
   };
 
-  // 2. Driver Update ETA
   const handleDriverUpdateEta = async (driverId: string, etaMinutes: number, etaFormatted: string) => {
     try {
       const res = await fetch('/api/driver/eta', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify({ driverId, etaMinutes, etaFormatted }),
       });
 
@@ -422,7 +415,7 @@ export default function App() {
         const result = await res.json();
         if (result.success) {
           if (authSession?.role === 'DRIVER') {
-            handleSessionChange({ role: 'DRIVER', user: result.driver });
+            setAuthSession({ role: 'DRIVER', user: result.driver });
           }
           if (result.notification) {
             setNotifications((prev) => [result.notification, ...prev]);
@@ -430,11 +423,10 @@ export default function App() {
         }
       }
     } catch (e) {
-      console.debug('Driver ETA fallback:', e);
+      console.debug('Driver ETA error:', e);
     }
   };
 
-  // 3. Driver Report Incident
   const handleDriverReportIncident = async (
     driverId: string,
     payload: { cause: string; category: string; rescheduledTime: string; advisory: string }
@@ -442,7 +434,10 @@ export default function App() {
     try {
       const res = await fetch('/api/driver/incident', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify({ driverId, ...payload }),
       });
 
@@ -450,7 +445,7 @@ export default function App() {
         const result = await res.json();
         if (result.success) {
           if (authSession?.role === 'DRIVER') {
-            handleSessionChange({ role: 'DRIVER', user: result.driver });
+            setAuthSession({ role: 'DRIVER', user: result.driver });
           }
           if (result.barangay) {
             setBarangays((prev) => prev.map((b) => (b.id === result.barangay.id ? result.barangay : b)));
@@ -461,13 +456,12 @@ export default function App() {
         }
       }
     } catch (e) {
-      console.debug('Driver incident fallback:', e);
+      console.debug('Driver incident error:', e);
     }
   };
 
-  // --- GOVERNMENT ADMIN OPERATIONS (CRUD & Incident Dispatcher) ---
+  // --- GOVERNMENT ADMIN OPERATIONS ---
 
-  // Admin Updates Barangay Schedule
   const handleAdminUpdateSchedule = async (
     barangayId: string,
     payload: {
@@ -484,7 +478,10 @@ export default function App() {
     try {
       const res = await fetch(`/api/admin/barangays/${barangayId}/schedule`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify(payload),
       });
 
@@ -503,7 +500,6 @@ export default function App() {
     }
   };
 
-  // Admin Broadcasts Delay Advisory
   const handleAdminInputDelay = async (
     barangayId: string,
     payload: {
@@ -520,7 +516,10 @@ export default function App() {
     try {
       const res = await fetch(`/api/admin/barangays/${barangayId}/delay`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify(payload),
       });
 
@@ -539,7 +538,6 @@ export default function App() {
     }
   };
 
-  // Admin Resolves Delay
   const handleAdminResolveDelay = async (
     barangayId: string,
     payload: {
@@ -552,7 +550,10 @@ export default function App() {
     try {
       const res = await fetch(`/api/admin/barangays/${barangayId}/resolve-delay`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify(payload),
       });
 
@@ -571,7 +572,6 @@ export default function App() {
     }
   };
 
-  // Admin Overrides Driver ETA
   const handleAdminOverrideEta = async (
     barangayId: string,
     payload: {
@@ -583,7 +583,10 @@ export default function App() {
     try {
       const res = await fetch(`/api/admin/barangays/${barangayId}/override-eta`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify(payload),
       });
 
@@ -655,17 +658,15 @@ export default function App() {
               setOfficialTab('notifications');
             }
           }}
-          isSseConnected={isSseConnected}
         />
       )}
 
       {/* Main Viewport Guarding */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
         {!authSession ? (
-          /* ISOLATED VIEW 0: Multi-Tenant Role Authentication Gateway */
-          <AuthScreen 
-            onLogin={(session) => handleSessionChange(session)} 
-            availableBarangays={barangays} 
+          <AuthScreen
+            onLogin={(session, token) => handleSessionChange(session, token)}
+            availableBarangays={barangays}
           />
         ) : authSession.role === 'RESIDENT' ? (
           /* ISOLATED VIEW 1: RESTRICTED RESIDENT VIEWPORT (Strictly NO Admin/Driver Telemetry Controls) */

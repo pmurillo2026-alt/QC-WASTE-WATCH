@@ -1,56 +1,79 @@
-import React, { useState } from 'react';
-import { AuthSession, ResidentUser, AdminOfficial, DriverUser, BarangaySchedule, UserRole } from '../types';
-import { QC_AUTHORIZED_OFFICIALS } from '../data/qcOfficials';
-import { QC_FLEET_DRIVERS } from '../data/qcDrivers';
-import { 
-  User, 
-  MapPin, 
-  Phone, 
-  Lock, 
-  ArrowRight, 
-  ShieldCheck, 
-  CheckCircle2, 
-  AlertCircle, 
-  Clock, 
-  CloudRain, 
-  Building2, 
-  Truck, 
-  BadgeCheck, 
+import React, { useState, useEffect } from 'react';
+import { AuthSession, BarangaySchedule, UserRole } from '../types';
+import {
+  User,
+  ArrowRight,
+  ShieldCheck,
+  AlertCircle,
+  Building2,
+  Truck,
   KeyRound,
-  Radio
+  Lock,
 } from 'lucide-react';
+import { LogoMark } from './LogoMark';
 
 interface AuthScreenProps {
-  onLogin: (session: AuthSession) => void;
+  onLogin: (session: AuthSession, token: string) => void;
   availableBarangays: BarangaySchedule[];
+}
+
+interface SetupStatus {
+  officialConfigured: boolean;
+  driverConfigured: boolean;
 }
 
 export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
   const [selectedRole, setSelectedRole] = useState<UserRole>('RESIDENT');
+  const [setupStatus, setSetupStatus] = useState<SetupStatus>({
+    officialConfigured: true,
+    driverConfigured: true,
+  });
 
   // Resident Auth State
   const [residentMode, setResidentMode] = useState<'login' | 'register'>('register');
   const [fullName, setFullName] = useState('');
   const [streetAddress, setStreetAddress] = useState('');
-  const [selectedBarangayId, setSelectedBarangayId] = useState(availableBarangays[0]?.id || 'brgy-batasan-hills');
+  const [selectedBarangayId, setSelectedBarangayId] = useState(
+    availableBarangays[0]?.id || 'brgy-batasan-hills'
+  );
   const [mobileNumber, setMobileNumber] = useState('');
   const [password, setPassword] = useState('');
   const [residentError, setResidentError] = useState('');
+  const [isResidentSubmitting, setIsResidentSubmitting] = useState(false);
 
   // Official Auth State
   const [officialEmployeeId, setOfficialEmployeeId] = useState('');
   const [officialBadgeNumber, setOfficialBadgeNumber] = useState('');
   const [officialPasscode, setOfficialPasscode] = useState('');
+  const [officialConfirmPasscode, setOfficialConfirmPasscode] = useState('');
   const [officialError, setOfficialError] = useState('');
+  const [isOfficialSubmitting, setIsOfficialSubmitting] = useState(false);
 
   // Driver Auth State
   const [driverEmployeeId, setDriverEmployeeId] = useState('');
   const [driverTruckCode, setDriverTruckCode] = useState('');
   const [driverPin, setDriverPin] = useState('');
+  const [driverConfirmPin, setDriverConfirmPin] = useState('');
   const [driverError, setDriverError] = useState('');
+  const [isDriverSubmitting, setIsDriverSubmitting] = useState(false);
 
-  // Handlers for Resident
-  const handleResidentSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    fetch('/api/auth/setup-status')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success) {
+          setSetupStatus({
+            officialConfigured: Boolean(data.officialConfigured),
+            driverConfigured: Boolean(data.driverConfigured),
+          });
+        }
+      })
+      .catch(() => {
+        // Keep safe defaults if check fails
+      });
+  }, []);
+
+  const handleResidentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setResidentError('');
 
@@ -60,258 +83,211 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
       if (!mobileNumber.trim() || mobileNumber.replace(/\D/g, '').length < 10) {
         return setResidentError('Please enter a valid 11-digit mobile number (e.g. 0917 123 4567).');
       }
-      if (!password.trim()) return setResidentError('Please enter a password or PIN.');
+      if (!password.trim() || password.trim().length < 4) {
+        return setResidentError('Please create a password or PIN with at least 4 characters.');
+      }
 
-      const selectedBarangay = availableBarangays.find((b) => b.id === selectedBarangayId);
-      const fullAddress = `${streetAddress.trim()}, Brgy. ${selectedBarangay?.name || 'Batasan Hills'}, Quezon City`;
-
-      const newResident: ResidentUser = {
-        id: `resident-${Date.now()}`,
-        fullName: fullName.trim(),
-        address: fullAddress,
-        mobileNumber: mobileNumber.trim(),
-        homeBarangayId: selectedBarangayId,
-        subscribedBarangayIds: [selectedBarangayId],
-        createdAt: new Date().toISOString(),
-      };
-
-      const session: AuthSession = { role: 'RESIDENT', user: newResident };
-      localStorage.setItem('qc_auth_session', JSON.stringify(session));
-      onLogin(session);
+      setIsResidentSubmitting(true);
+      try {
+        const res = await fetch('/api/auth/resident/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fullName: fullName.trim(),
+            streetAddress: streetAddress.trim(),
+            homeBarangayId: selectedBarangayId,
+            mobileNumber: mobileNumber.trim(),
+            password: password.trim(),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          return setResidentError(data.message || 'Could not complete registration. Please try again.');
+        }
+        onLogin(data.session, data.token);
+      } catch {
+        setResidentError('Unable to reach the server. Please try again.');
+      } finally {
+        setIsResidentSubmitting(false);
+      }
     } else {
       if (!mobileNumber.trim()) return setResidentError('Please enter your registered mobile number.');
-      if (!password.trim()) return setResidentError('Please enter your PIN / password.');
+      if (!password.trim()) return setResidentError('Please enter your password or PIN.');
 
-      const demoUser: ResidentUser = {
-        id: `resident-login-${Date.now()}`,
-        fullName: 'Maria Corazon Santos',
-        address: 'Blk 7 Lot 14 San Mateo Rd, Brgy. Batasan Hills, Quezon City',
-        mobileNumber: mobileNumber.trim(),
-        homeBarangayId: 'brgy-batasan-hills',
-        subscribedBarangayIds: ['brgy-batasan-hills', 'brgy-commonwealth'],
-        createdAt: new Date().toISOString(),
-      };
-
-      const session: AuthSession = { role: 'RESIDENT', user: demoUser };
-      localStorage.setItem('qc_auth_session', JSON.stringify(session));
-      onLogin(session);
+      setIsResidentSubmitting(true);
+      try {
+        const res = await fetch('/api/auth/resident/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mobileNumber: mobileNumber.trim(),
+            password: password.trim(),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          return setResidentError(
+            data.message || 'Mobile number or password is incorrect. Register first if you are new.'
+          );
+        }
+        onLogin(data.session, data.token);
+      } catch {
+        setResidentError('Unable to reach the server. Please try again.');
+      } finally {
+        setIsResidentSubmitting(false);
+      }
     }
   };
 
-  const handleDemoResident = (brgyId: string, name: string, address: string, phone: string) => {
-    const demoUser: ResidentUser = {
-      id: `demo-${brgyId}`,
-      fullName: name,
-      address: `${address}, Quezon City`,
-      mobileNumber: phone,
-      homeBarangayId: brgyId,
-      subscribedBarangayIds: [brgyId],
-      createdAt: new Date().toISOString(),
-    };
-    const session: AuthSession = { role: 'RESIDENT', user: demoUser };
-    localStorage.setItem('qc_auth_session', JSON.stringify(session));
-    onLogin(session);
-  };
-
-  // Handlers for Official
-  const handleOfficialSubmit = (e: React.FormEvent) => {
+  const handleOfficialSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setOfficialError('');
 
-    const found = QC_AUTHORIZED_OFFICIALS.find(
-      (o) =>
-        o.employeeId.toLowerCase() === officialEmployeeId.trim().toLowerCase() ||
-        o.badgeNumber.toLowerCase() === officialBadgeNumber.trim().toLowerCase()
-    );
+    if (!officialEmployeeId.trim() || !officialBadgeNumber.trim() || !officialPasscode.trim()) {
+      return setOfficialError('Please fill in your Employee ID, Badge Number, and Passcode.');
+    }
 
-    if (found) {
-      const session: AuthSession = { role: 'OFFICIAL', user: found };
-      localStorage.setItem('qc_auth_session', JSON.stringify(session));
-      onLogin(session);
-    } else {
-      // Allow fallback login with first official if fields provided
-      if (officialEmployeeId.trim() && officialPasscode.trim()) {
-        const session: AuthSession = { role: 'OFFICIAL', user: QC_AUTHORIZED_OFFICIALS[0] };
-        localStorage.setItem('qc_auth_session', JSON.stringify(session));
-        onLogin(session);
-      } else {
-        setOfficialError('Invalid Government Official credentials. Use demo profiles or QC Employee ID.');
+    const isClaimMode = !setupStatus.officialConfigured;
+    if (isClaimMode) {
+      if (officialPasscode.trim().length < 6) {
+        return setOfficialError('Please choose an Official Passcode of at least 6 characters.');
       }
+      if (officialPasscode !== officialConfirmPasscode) {
+        return setOfficialError('Passcodes do not match. Please re-enter to confirm.');
+      }
+    }
+
+    setIsOfficialSubmitting(true);
+    try {
+      const endpoint = isClaimMode ? '/api/auth/official/claim' : '/api/auth/official/login';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: officialEmployeeId.trim(),
+          badgeNumber: officialBadgeNumber.trim(),
+          passcode: officialPasscode.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return setOfficialError(data.message || 'Invalid City Official credentials.');
+      }
+      setSetupStatus((prev) => ({ ...prev, officialConfigured: true }));
+      onLogin(data.session, data.token);
+    } catch {
+      setOfficialError('Unable to reach the server. Please try again.');
+    } finally {
+      setIsOfficialSubmitting(false);
     }
   };
 
-  const handleDemoOfficial = (official: AdminOfficial) => {
-    const session: AuthSession = { role: 'OFFICIAL', user: official };
-    localStorage.setItem('qc_auth_session', JSON.stringify(session));
-    onLogin(session);
-  };
-
-  // Handlers for Driver
-  const handleDriverSubmit = (e: React.FormEvent) => {
+  const handleDriverSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setDriverError('');
 
-    const found = QC_FLEET_DRIVERS.find(
-      (d) =>
-        d.employeeId.toLowerCase() === driverEmployeeId.trim().toLowerCase() ||
-        d.truckCode.toLowerCase() === driverTruckCode.trim().toLowerCase()
-    );
+    if (!driverEmployeeId.trim() || !driverTruckCode.trim() || !driverPin.trim()) {
+      return setDriverError('Please enter your Driver Employee ID, Truck Code, and PIN.');
+    }
 
-    if (found) {
-      const session: AuthSession = { role: 'DRIVER', user: found };
-      localStorage.setItem('qc_auth_session', JSON.stringify(session));
-      onLogin(session);
-    } else {
-      if (driverEmployeeId.trim() && driverTruckCode.trim()) {
-        const session: AuthSession = { role: 'DRIVER', user: QC_FLEET_DRIVERS[0] };
-        localStorage.setItem('qc_auth_session', JSON.stringify(session));
-        onLogin(session);
-      } else {
-        setDriverError('Invalid Driver Fleet credentials. Please verify your Truck Code.');
+    const isClaimMode = !setupStatus.driverConfigured;
+    if (isClaimMode) {
+      if (driverPin.trim().length < 4) {
+        return setDriverError('Please choose a Driver PIN of at least 4 characters.');
       }
+      if (driverPin !== driverConfirmPin) {
+        return setDriverError('PIN entries do not match. Please re-enter to confirm.');
+      }
+    }
+
+    setIsDriverSubmitting(true);
+    try {
+      const endpoint = isClaimMode ? '/api/auth/driver/claim' : '/api/auth/driver/login';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: driverEmployeeId.trim(),
+          truckCode: driverTruckCode.trim(),
+          pin: driverPin.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return setDriverError(data.message || 'Invalid Truck Driver credentials.');
+      }
+      setSetupStatus((prev) => ({ ...prev, driverConfigured: true }));
+      onLogin(data.session, data.token);
+    } catch {
+      setDriverError('Unable to reach the server. Please try again.');
+    } finally {
+      setIsDriverSubmitting(false);
     }
   };
 
-  const handleDemoDriver = (drv: DriverUser) => {
-    const session: AuthSession = { role: 'DRIVER', user: drv };
-    localStorage.setItem('qc_auth_session', JSON.stringify(session));
-    onLogin(session);
-  };
-
   return (
-    <div className="min-h-[calc(100vh-4.5rem)] py-8 px-4 sm:px-6 lg:px-8 flex items-center justify-center font-sans">
-      <div className="max-w-4xl w-full grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        {/* Left Column: Context & Role Selection Banner */}
+    <div className="min-h-[calc(100vh-5rem)] py-10 px-4 sm:px-6 lg:px-8 flex items-center justify-center font-sans">
+      <div className="max-w-5xl w-full grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
+        {/* Left Column: Official QC Waste Watch Logo & Role Overview */}
         <div className="lg:col-span-5 space-y-6">
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-semibold">
-            <ShieldCheck className="w-4 h-4 text-emerald-700" />
-            Quezon City Waste Watch
+          <div className="flex items-center gap-4">
+            <LogoMark size="lg" />
+            <div className="space-y-1">
+              <p className="text-xs font-semibold text-emerald-700">
+                Quezon City EPWMD
+              </p>
+              <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight leading-tight text-balance">
+                QC Waste Watch
+              </h1>
+            </div>
           </div>
 
-          <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight leading-tight">
-            Sign In to QC Waste Watch
-          </h1>
-
-          <p className="text-sm text-slate-600 leading-relaxed">
-            Please choose how you want to use the app: as a <strong>Resident</strong> (to check schedules and get delay alerts), a <strong>City Official</strong> (to update routes and post notices), or a <strong>Truck Driver</strong> (to notify residents when you arrive).
+          <p className="text-sm sm:text-base text-slate-600 leading-relaxed">
+            Official garbage collection schedule tracker and community delay alert portal for Quezon City barangays.
           </p>
 
-          {/* Quick Demo Selector Cards based on role */}
-          <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-3">
-            <div className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center justify-between">
-              <span>Quick Login (Sample Accounts):</span>
-              <span className="text-[10px] text-emerald-700 font-bold">1-Click Sign In</span>
+          <div className="border-t border-slate-200 pt-5 space-y-4">
+            <div>
+              <h2 className="text-sm font-bold text-slate-900">Residents</h2>
+              <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+                Check your barangay pickup days, follow multiple neighborhoods, and get instant delay alerts.
+              </p>
             </div>
 
-            {selectedRole === 'RESIDENT' && (
-              <div className="space-y-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleDemoResident(
-                      'brgy-batasan-hills',
-                      'Maria Corazon Santos',
-                      'Blk 7 Lot 14 San Mateo Rd, Brgy. Batasan Hills',
-                      '0917-882-3491'
-                    )
-                  }
-                  className="w-full text-left p-2.5 bg-white hover:bg-emerald-50 border border-slate-200 hover:border-emerald-300 rounded-xl transition-all cursor-pointer group"
-                >
-                  <div className="text-xs font-bold text-slate-800 group-hover:text-emerald-800 flex items-center justify-between">
-                    <span>Maria Santos • Batasan Hills</span>
-                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-mono font-bold">
-                      RESIDENT
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-500">Batasan Hills Resident • Subscribed</div>
-                </button>
+            <div className="border-t border-slate-200/80 pt-3">
+              <h2 className="text-sm font-bold text-slate-900">City Officials</h2>
+              <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+                Update collection windows, post weather or traffic delay reasons, and notify residents.
+              </p>
+            </div>
 
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleDemoResident(
-                      'brgy-socorro-cubao',
-                      'Eduardo "Eddie" Ramos',
-                      '15th Avenue corner P. Tuazon, Brgy. Socorro',
-                      '0918-554-1290'
-                    )
-                  }
-                  className="w-full text-left p-2.5 bg-white hover:bg-emerald-50 border border-slate-200 hover:border-emerald-300 rounded-xl transition-all cursor-pointer group"
-                >
-                  <div className="text-xs font-bold text-slate-800 group-hover:text-emerald-800 flex items-center justify-between">
-                    <span>Eduardo Ramos • Socorro (Cubao)</span>
-                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-mono font-bold">
-                      RESIDENT
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-500">Cubao Commercial District Resident</div>
-                </button>
-              </div>
-            )}
-
-            {selectedRole === 'OFFICIAL' && (
-              <div className="space-y-2">
-                {QC_AUTHORIZED_OFFICIALS.map((off) => (
-                  <button
-                    key={off.id}
-                    type="button"
-                    onClick={() => handleDemoOfficial(off)}
-                    className="w-full text-left p-2.5 bg-white hover:bg-amber-50 border border-slate-200 hover:border-amber-300 rounded-xl transition-all cursor-pointer group"
-                  >
-                    <div className="text-xs font-bold text-slate-800 group-hover:text-amber-900 flex items-center justify-between">
-                      <span>{off.fullName}</span>
-                      <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded font-mono font-bold">
-                        {off.badgeNumber}
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-slate-500">{off.title}</div>
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {selectedRole === 'DRIVER' && (
-              <div className="space-y-2">
-                {QC_FLEET_DRIVERS.slice(0, 3).map((drv) => (
-                  <button
-                    key={drv.id}
-                    type="button"
-                    onClick={() => handleDemoDriver(drv)}
-                    className="w-full text-left p-2.5 bg-white hover:bg-cyan-50 border border-slate-200 hover:border-cyan-300 rounded-xl transition-all cursor-pointer group"
-                  >
-                    <div className="text-xs font-bold text-slate-800 group-hover:text-cyan-900 flex items-center justify-between">
-                      <span>{drv.fullName}</span>
-                      <span className="text-[10px] bg-cyan-100 text-cyan-800 px-2 py-0.5 rounded font-mono font-bold">
-                        {drv.truckCode}
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-slate-500">Route: Brgy. {drv.assignedBarangayName}</div>
-                  </button>
-                ))}
-              </div>
-            )}
+            <div className="border-t border-slate-200/80 pt-3">
+              <h2 className="text-sm font-bold text-slate-900">Truck Drivers</h2>
+              <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+                Check in when you arrive on site, update arrival times, and report road problems.
+              </p>
+            </div>
           </div>
         </div>
 
-        {/* Right Column: Isolated RBAC Login Viewports */}
-        <div className="lg:col-span-7 bg-white rounded-3xl border border-slate-200 shadow-xl p-6 sm:p-8 space-y-6">
-          {/* Role Selection Tabs */}
+        {/* Right Column: Role-Specific Sign In Form */}
+        <div className="lg:col-span-7 bg-white rounded-3xl border border-slate-200 shadow-sm p-6 sm:p-8 space-y-6">
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-              Step 1 • Choose Who You Are
-            </label>
+            <p className="text-xs font-semibold text-slate-500 mb-2">
+              Step 1 · Choose Your Account Type
+            </p>
             <div className="grid grid-cols-3 gap-1.5 p-1.5 bg-slate-100 rounded-2xl border border-slate-200">
               <button
                 type="button"
                 id="role-tab-resident"
                 onClick={() => setSelectedRole('RESIDENT')}
-                className={`py-3 px-2 text-xs sm:text-sm font-bold rounded-xl transition-all flex flex-col sm:flex-row items-center justify-center gap-1.5 cursor-pointer ${
+                className={`py-3 px-2 text-xs sm:text-sm font-bold rounded-xl transition-colors flex flex-col sm:flex-row items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 ${
                   selectedRole === 'RESIDENT'
-                    ? 'bg-emerald-600 text-white shadow-md'
+                    ? 'bg-emerald-700 text-white shadow-xs'
                     : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
                 }`}
               >
-                <User className="w-4 h-4" />
+                <User className="w-4 h-4 shrink-0" />
                 <span>Resident</span>
               </button>
 
@@ -319,13 +295,13 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
                 type="button"
                 id="role-tab-official"
                 onClick={() => setSelectedRole('OFFICIAL')}
-                className={`py-3 px-2 text-xs sm:text-sm font-bold rounded-xl transition-all flex flex-col sm:flex-row items-center justify-center gap-1.5 cursor-pointer ${
+                className={`py-3 px-2 text-xs sm:text-sm font-bold rounded-xl transition-colors flex flex-col sm:flex-row items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 ${
                   selectedRole === 'OFFICIAL'
-                    ? 'bg-slate-900 text-white shadow-md'
+                    ? 'bg-slate-900 text-white shadow-xs'
                     : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
                 }`}
               >
-                <Building2 className="w-4 h-4 text-amber-400" />
+                <Building2 className="w-4 h-4 text-amber-400 shrink-0" />
                 <span>City Official</span>
               </button>
 
@@ -333,13 +309,13 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
                 type="button"
                 id="role-tab-driver"
                 onClick={() => setSelectedRole('DRIVER')}
-                className={`py-3 px-2 text-xs sm:text-sm font-bold rounded-xl transition-all flex flex-col sm:flex-row items-center justify-center gap-1.5 cursor-pointer ${
+                className={`py-3 px-2 text-xs sm:text-sm font-bold rounded-xl transition-colors flex flex-col sm:flex-row items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 ${
                   selectedRole === 'DRIVER'
-                    ? 'bg-teal-700 text-white shadow-md'
+                    ? 'bg-teal-700 text-white shadow-xs'
                     : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
                 }`}
               >
-                <Truck className="w-4 h-4 text-cyan-300" />
+                <Truck className="w-4 h-4 text-cyan-200 shrink-0" />
                 <span>Truck Driver</span>
               </button>
             </div>
@@ -351,8 +327,11 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
               <div className="flex p-1 bg-slate-100 rounded-xl border border-slate-200">
                 <button
                   type="button"
-                  onClick={() => setResidentMode('register')}
-                  className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${
+                  onClick={() => {
+                    setResidentMode('register');
+                    setResidentError('');
+                  }}
+                  className={`flex-1 py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
                     residentMode === 'register' ? 'bg-white text-emerald-800 shadow-xs' : 'text-slate-600'
                   }`}
                 >
@@ -360,8 +339,11 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setResidentMode('login')}
-                  className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${
+                  onClick={() => {
+                    setResidentMode('login');
+                    setResidentError('');
+                  }}
+                  className={`flex-1 py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
                     residentMode === 'login' ? 'bg-white text-emerald-800 shadow-xs' : 'text-slate-600'
                   }`}
                 >
@@ -437,13 +419,13 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
                       placeholder="0917 123 4567"
                       value={mobileNumber}
                       onChange={(e) => setMobileNumber(e.target.value)}
-                      className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm"
+                      className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm tabular-nums"
                     />
                   </div>
 
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">
-                      Password / 4-Digit PIN <span className="text-red-500">*</span>
+                      Password / PIN <span className="text-red-500">*</span>
                     </label>
                     <input
                       type="password"
@@ -459,9 +441,16 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
                 <button
                   type="submit"
                   id="btn-submit-resident-auth"
-                  className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-2xl text-sm transition-all cursor-pointer shadow-md shadow-emerald-700/20 flex items-center justify-center gap-2"
+                  disabled={isResidentSubmitting}
+                  className="w-full py-3.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white font-bold rounded-2xl text-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
                 >
-                  <span>{residentMode === 'register' ? 'Register as Resident' : 'Sign In as Resident'}</span>
+                  <span>
+                    {isResidentSubmitting
+                      ? 'Please wait...'
+                      : residentMode === 'register'
+                      ? 'Register as Resident'
+                      : 'Sign In as Resident'}
+                  </span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </form>
@@ -473,7 +462,11 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
             <div className="space-y-4">
               <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200 flex items-center gap-2 text-xs text-amber-900 font-medium">
                 <ShieldCheck className="w-4 h-4 text-amber-700 shrink-0" />
-                <span>For Quezon City Environmental Protection & Waste Management Department staff.</span>
+                <span>
+                  {!setupStatus.officialConfigured
+                    ? 'First-time setup: Verify your EPWMD Employee ID and create the City Official access passcode.'
+                    : 'For Quezon City Environmental Protection & Waste Management Department staff.'}
+                </span>
               </div>
 
               {officialError && (
@@ -496,10 +489,12 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
                     onChange={(e) => setOfficialEmployeeId(e.target.value)}
                     className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl font-mono text-sm"
                   />
-                  <span className="text-[10px] text-slate-400 mt-0.5 block">Your City Hall / EPWMD ID number</span>
+                  <span className="text-[11px] text-slate-500 mt-1 block">
+                    Your assigned City Hall / EPWMD Employee ID
+                  </span>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">
                       Badge Number <span className="text-red-500">*</span>
@@ -516,7 +511,8 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
 
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">
-                      Password / Passcode <span className="text-red-500">*</span>
+                      {!setupStatus.officialConfigured ? 'Create Access Passcode' : 'Access Passcode'}{' '}
+                      <span className="text-red-500">*</span>
                     </label>
                     <input
                       type="password"
@@ -529,27 +525,40 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
                   </div>
                 </div>
 
-                <div className="flex justify-between items-center text-xs">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOfficialEmployeeId('QC-EPWMD-8821');
-                      setOfficialBadgeNumber('BDG-8821');
-                      setOfficialPasscode('1234');
-                    }}
-                    className="text-amber-800 hover:underline font-bold"
-                  >
-                    Quick fill: Engr. Bautista account
-                  </button>
-                </div>
+                {!setupStatus.officialConfigured && (
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      Confirm Access Passcode <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      placeholder="Re-enter passcode"
+                      value={officialConfirmPasscode}
+                      onChange={(e) => setOfficialConfirmPasscode(e.target.value)}
+                      className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm"
+                    />
+                  </div>
+                )}
 
                 <button
                   type="submit"
                   id="btn-submit-official-auth"
-                  className="w-full py-3.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-2xl text-sm transition-all cursor-pointer shadow-md flex items-center justify-center gap-2"
+                  disabled={isOfficialSubmitting}
+                  className="w-full py-3.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-bold rounded-2xl text-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
                 >
-                  <Building2 className="w-4 h-4 text-amber-400" />
-                  <span>Sign In as City Official</span>
+                  {!setupStatus.officialConfigured ? (
+                    <KeyRound className="w-4 h-4 text-amber-400" />
+                  ) : (
+                    <Building2 className="w-4 h-4 text-amber-400" />
+                  )}
+                  <span>
+                    {isOfficialSubmitting
+                      ? 'Verifying...'
+                      : !setupStatus.officialConfigured
+                      ? 'Set Official Passcode & Sign In'
+                      : 'Sign In as City Official'}
+                  </span>
                 </button>
               </form>
             </div>
@@ -560,7 +569,11 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
             <div className="space-y-4">
               <div className="p-3 bg-cyan-50 rounded-2xl border border-cyan-200 flex items-center gap-2 text-xs text-cyan-900 font-medium">
                 <Truck className="w-4 h-4 text-cyan-700 shrink-0" />
-                <span>For Quezon City garbage truck drivers and collection crews.</span>
+                <span>
+                  {!setupStatus.driverConfigured
+                    ? 'First-time setup: Verify your Driver ID and Truck Code to set the fleet access PIN.'
+                    : 'For Quezon City garbage truck drivers and collection crews.'}
+                </span>
               </div>
 
               {driverError && (
@@ -585,7 +598,7 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">
                       Truck Code <span className="text-red-500">*</span>
@@ -602,7 +615,8 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
 
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">
-                      4-Digit PIN <span className="text-red-500">*</span>
+                      {!setupStatus.driverConfigured ? 'Create Driver PIN' : 'Driver PIN'}{' '}
+                      <span className="text-red-500">*</span>
                     </label>
                     <input
                       type="password"
@@ -615,31 +629,51 @@ export function AuthScreen({ onLogin, availableBarangays }: AuthScreenProps) {
                   </div>
                 </div>
 
-                <div className="flex justify-between items-center text-xs">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDriverEmployeeId('QC-DRV-2041');
-                      setDriverTruckCode('QC-TRK-204');
-                      setDriverPin('1234');
-                    }}
-                    className="text-cyan-800 hover:underline font-bold"
-                  >
-                    Quick fill: Kuya Nestor (Batasan Hills route)
-                  </button>
-                </div>
+                {!setupStatus.driverConfigured && (
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      Confirm Driver PIN <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      placeholder="Re-enter PIN"
+                      value={driverConfirmPin}
+                      onChange={(e) => setDriverConfirmPin(e.target.value)}
+                      className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm"
+                    />
+                  </div>
+                )}
 
                 <button
                   type="submit"
                   id="btn-submit-driver-auth"
-                  className="w-full py-3.5 bg-teal-700 hover:bg-teal-600 text-white font-bold rounded-2xl text-sm transition-all cursor-pointer shadow-md flex items-center justify-center gap-2"
+                  disabled={isDriverSubmitting}
+                  className="w-full py-3.5 bg-teal-700 hover:bg-teal-800 disabled:opacity-60 text-white font-bold rounded-2xl text-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
                 >
                   <Truck className="w-4 h-4 text-cyan-200" />
-                  <span>Sign In as Truck Driver</span>
+                  <span>
+                    {isDriverSubmitting
+                      ? 'Verifying...'
+                      : !setupStatus.driverConfigured
+                      ? 'Set Driver PIN & Sign In'
+                      : 'Sign In as Truck Driver'}
+                  </span>
                 </button>
               </form>
             </div>
           )}
+
+          {/* Privacy Notice */}
+          <div className="border-t border-slate-200 pt-4 flex items-start gap-3 text-xs text-slate-600">
+            <Lock className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-bold text-slate-900">Privacy Notice</p>
+              <p className="leading-relaxed">
+                Your personal information is safe and protected. Your details are collected strictly for account sign-in and delivering your Quezon City garbage collection updates, and will never be shared or used for any other purpose.
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     </div>

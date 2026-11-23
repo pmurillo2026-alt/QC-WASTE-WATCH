@@ -1,11 +1,108 @@
+import 'dotenv/config';
+import crypto from 'crypto';
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// Server-side Supabase client (reads strictly from process.env; never hardcoded)
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || '';
+const supabase: SupabaseClient | null =
+  SUPABASE_URL && SUPABASE_SECRET_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      })
+    : null;
+
+// Ephemeral HMAC signing key fallback if SESSION_SECRET is unset
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
+function hashPassword(secret: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(secret, salt, 64).toString('hex');
+  return `${salt}:${derived}`;
+}
+
+function verifyPasswordHash(secret: string, storedHash: string): boolean {
+  const parts = storedHash.split(':');
+  if (parts.length !== 2) return false;
+  const [salt, expectedHex] = parts;
+  const derived = crypto.scryptSync(secret, salt, 64);
+  const expected = Buffer.from(expectedHex, 'hex');
+  if (derived.length !== expected.length) return false;
+  return crypto.timingSafeEqual(derived, expected);
+}
+
+function verifyPlainConstantTime(provided: string, expected: string): boolean {
+  const a = crypto.createHash('sha256').update(provided).digest();
+  const b = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+type UserRole = 'RESIDENT' | 'OFFICIAL' | 'DRIVER';
+
+interface SessionClaims {
+  userId: string;
+  role: UserRole;
+  exp: number;
+}
+
+function createSessionToken(userId: string, role: UserRole): string {
+  const payload: SessionClaims = {
+    userId,
+    role,
+    exp: Date.now() + 1000 * 60 * 60 * 24, // 24h
+  };
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
+  return `${encoded}.${sig}`;
+}
+
+function verifySessionToken(token: string): SessionClaims | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    const [encoded, sig] = parts;
+    const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expectedSig);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    const claims = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as SessionClaims;
+    if (!claims.userId || !claims.role || Date.now() > claims.exp) return null;
+    return claims;
+  } catch {
+    return null;
+  }
+}
+
+interface AuthenticatedRequest extends express.Request {
+  auth?: SessionClaims;
+}
+
+function requireAuth(allowedRoles?: UserRole[]) {
+  return (req: AuthenticatedRequest, res: express.Response, next: express.NextFunction) => {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'Authentication required. Please sign in first.' });
+    }
+    const claims = verifySessionToken(token);
+    if (!claims) {
+      return res.status(401).json({ success: false, message: 'Your session has expired. Please sign in again.' });
+    }
+    if (allowedRoles && !allowedRoles.includes(claims.role)) {
+      return res.status(403).json({ success: false, message: 'You do not have permission for this action.' });
+    }
+    req.auth = claims;
+    next();
+  };
+}
 
 // In-memory backend store seeded with official QC EPWMD data
 interface DelayDetails {
@@ -132,7 +229,263 @@ let drivers: DriverUser[] = [
     targetEtaFormatted: '10:15 PM',
     slaBreachDetected: false,
   },
+  {
+    id: 'driver-danilo',
+    fullName: 'Danilo Morales',
+    employeeId: 'QC-DRV-2094',
+    licenseNumber: 'N02-06-448291',
+    truckCode: 'QC-TRK-209',
+    truckCallsign: 'SPIRIT-HAUL-209',
+    contractor: 'QC EPWMD Fleet Sector 2',
+    assignedBarangayId: 'brgy-holy-spirit',
+    assignedBarangayName: 'Holy Spirit',
+    assignedDistrict: 2,
+    mobileNumber: '0919-332-2094',
+    currentStatus: 'IN_TRANSIT',
+    targetEtaTimestamp: Date.now() + 300_000,
+    targetEtaFormatted: '07:15 AM',
+    slaBreachDetected: false,
+  },
+  {
+    id: 'driver-edgardo',
+    fullName: 'Edgardo Reyes',
+    employeeId: 'QC-DRV-1095',
+    licenseNumber: 'N03-99-192834',
+    truckCode: 'QC-TRK-109',
+    truckCallsign: 'VISAYAS-COMPACTOR-109',
+    contractor: 'QC EPWMD Fleet Sector 1',
+    assignedBarangayId: 'brgy-project-6',
+    assignedBarangayName: 'Project 6',
+    assignedDistrict: 1,
+    mobileNumber: '0917-550-1095',
+    currentStatus: 'IN_TRANSIT',
+    targetEtaTimestamp: Date.now() + 360_000,
+    targetEtaFormatted: '07:00 AM',
+    slaBreachDetected: false,
+  },
+  {
+    id: 'driver-gregorio',
+    fullName: 'Gregorio Garcia',
+    employeeId: 'QC-DRV-5086',
+    licenseNumber: 'N02-08-592831',
+    truckCode: 'QC-TRK-508',
+    truckCallsign: 'REGALADO-SPEED-508',
+    contractor: 'QC North Waste Solutions - Sector 5',
+    assignedBarangayId: 'brgy-fairview',
+    assignedBarangayName: 'Fairview',
+    assignedDistrict: 5,
+    mobileNumber: '0922-881-5086',
+    currentStatus: 'IN_TRANSIT',
+    targetEtaTimestamp: Date.now() + 420_000,
+    targetEtaFormatted: '06:45 AM',
+    slaBreachDetected: false,
+  },
 ];
+
+interface AuthorizedOfficialRecord {
+  id: string;
+  fullName: string;
+  title: string;
+  department: string;
+  employeeId: string;
+  badgeNumber: string;
+  role: 'OPERATIONS_CHIEF' | 'DISTRICT_SUPERVISOR' | 'DISPATCH_OFFICER';
+  assignedDistricts: number[];
+  isAuthorized: boolean;
+}
+
+const AUTHORIZED_OFFICIALS: AuthorizedOfficialRecord[] = [
+  {
+    id: 'official-bautista',
+    fullName: 'Engr. Maria Teresa Bautista',
+    title: 'Solid Waste Operations Chief',
+    department: 'QC Environmental Protection & Waste Management Department (EPWMD)',
+    employeeId: 'QC-EPWMD-8821',
+    badgeNumber: 'BDG-8821',
+    role: 'OPERATIONS_CHIEF',
+    assignedDistricts: [1, 2, 3, 4, 5, 6],
+    isAuthorized: true,
+  },
+  {
+    id: 'official-reyes',
+    fullName: 'Supervisor Roberto Reyes',
+    title: 'District 2 & 3 Senior Dispatch Officer',
+    department: 'EPWMD Fleet Monitoring & Operations',
+    employeeId: 'QC-EPWMD-4019',
+    badgeNumber: 'BDG-4019',
+    role: 'DISTRICT_SUPERVISOR',
+    assignedDistricts: [2, 3],
+    isAuthorized: true,
+  },
+  {
+    id: 'official-cruz',
+    fullName: 'Officer Angelica Cruz',
+    title: 'Emergency Waste Routing Specialist',
+    department: 'QC Disaster Risk Reduction & Management Operations Center (QCDRRMO)',
+    employeeId: 'QC-EPWMD-9104',
+    badgeNumber: 'BDG-9104',
+    role: 'DISPATCH_OFFICER',
+    assignedDistricts: [1, 4, 5, 6],
+    isAuthorized: true,
+  },
+];
+
+interface ResidentRecord {
+  id: string;
+  fullName: string;
+  address: string;
+  mobileNumber: string;
+  normalizedMobile: string;
+  homeBarangayId: string;
+  subscribedBarangayIds: string[];
+  passwordHash: string;
+  createdAt: string;
+}
+
+let residentAccounts: ResidentRecord[] = [];
+const claimedRolePasscodes: Partial<Record<'OFFICIAL' | 'DRIVER', string>> = {};
+
+function normalizeMobile(phone: string): string {
+  return phone.replace(/\D/g, '');
+}
+
+async function syncSupabaseNotification(notif: WasteNotification) {
+  if (!supabase) return;
+  try {
+    await supabase.from('notifications').upsert({
+      id: notif.id,
+      barangay_id: notif.barangayId,
+      barangay_name: notif.barangayName,
+      district: notif.district,
+      type: notif.type,
+      title: notif.title,
+      scheduled_date: notif.scheduledDate,
+      scheduled_time: notif.scheduledTime,
+      cause_of_delay: notif.causeOfDelay ?? null,
+      delay_category: notif.delayCategory ?? null,
+      original_time: notif.originalTime ?? null,
+      rescheduled_date: notif.rescheduledDate ?? null,
+      rescheduled_time: notif.rescheduledTime ?? null,
+      advisory: notif.advisory ?? null,
+      timestamp_label: notif.timestamp,
+      is_read: notif.isRead,
+      severity: notif.severity,
+      updated_by: notif.updatedBy,
+      telemetry_eta_formatted: notif.telemetryEtaFormatted ?? null,
+      is_sla_breach: notif.isSlaBreach ?? false,
+      driver_id: notif.driverId ?? null,
+      truck_code: notif.truckCode ?? null,
+    });
+  } catch {
+    // Non-blocking fallback when tables are not yet initialized
+  }
+}
+
+async function syncSupabaseBarangay(b: BarangaySchedule) {
+  if (!supabase) return;
+  try {
+    await supabase.from('barangays').upsert({
+      id: b.id,
+      name: b.name,
+      district: b.district,
+      sub_area: b.subArea ?? null,
+      zip_code: b.zipCode,
+      regular_days: b.regularDays,
+      pickup_window: b.pickupWindow,
+      waste_type: b.wasteType,
+      next_scheduled_date: b.nextScheduledDate,
+      next_scheduled_time: b.nextScheduledTime,
+      contractor: b.contractor,
+      truck_code: b.truckCode,
+      status: b.status,
+      current_delay: b.currentDelay ?? null,
+    });
+  } catch {
+    // Non-blocking fallback
+  }
+}
+
+async function hydrateFromSupabase() {
+  if (!supabase) return;
+  try {
+    const [resCreds, resResidents, resBrgys, resNotifs] = await Promise.all([
+      supabase.from('role_credentials').select('*'),
+      supabase.from('residents').select('*'),
+      supabase.from('barangays').select('*'),
+      supabase.from('notifications').select('*').order('created_at', { ascending: false }).limit(50),
+    ]);
+
+    if (resCreds.data) {
+      for (const row of resCreds.data as Array<{ role: string; passcode_hash: string }>) {
+        if ((row.role === 'OFFICIAL' || row.role === 'DRIVER') && row.passcode_hash) {
+          claimedRolePasscodes[row.role] = row.passcode_hash;
+        }
+      }
+    }
+
+    if (resResidents.data && resResidents.data.length > 0) {
+      residentAccounts = resResidents.data.map((r: any) => ({
+        id: r.id,
+        fullName: r.full_name,
+        address: r.address,
+        mobileNumber: r.mobile_number,
+        normalizedMobile: normalizeMobile(r.mobile_number),
+        homeBarangayId: r.home_barangay_id,
+        subscribedBarangayIds: Array.isArray(r.subscribed_barangay_ids) ? r.subscribed_barangay_ids : [r.home_barangay_id],
+        passwordHash: r.password_hash,
+        createdAt: r.created_at,
+      }));
+    }
+
+    if (resBrgys.data && resBrgys.data.length > 0) {
+      barangays = resBrgys.data.map((b: any) => ({
+        id: b.id,
+        name: b.name,
+        district: b.district,
+        subArea: b.sub_area ?? undefined,
+        zipCode: b.zip_code,
+        regularDays: Array.isArray(b.regular_days) ? b.regular_days : [],
+        pickupWindow: b.pickup_window,
+        wasteType: b.waste_type,
+        nextScheduledDate: b.next_scheduled_date,
+        nextScheduledTime: b.next_scheduled_time,
+        contractor: b.contractor,
+        truckCode: b.truck_code,
+        status: b.status,
+        currentDelay: b.current_delay ?? undefined,
+      }));
+    }
+
+    if (resNotifs.data && resNotifs.data.length > 0) {
+      notifications = resNotifs.data.map((n: any) => ({
+        id: n.id,
+        barangayId: n.barangay_id,
+        barangayName: n.barangay_name,
+        district: n.district,
+        type: n.type,
+        title: n.title,
+        scheduledDate: n.scheduled_date,
+        scheduledTime: n.scheduled_time,
+        causeOfDelay: n.cause_of_delay ?? undefined,
+        delayCategory: n.delay_category ?? undefined,
+        originalTime: n.original_time ?? undefined,
+        rescheduledDate: n.rescheduled_date ?? undefined,
+        rescheduledTime: n.rescheduled_time ?? undefined,
+        advisory: n.advisory ?? undefined,
+        timestamp: n.timestamp_label,
+        isRead: Boolean(n.is_read),
+        severity: n.severity,
+        updatedBy: n.updated_by ?? '',
+        telemetryEtaFormatted: n.telemetry_eta_formatted ?? undefined,
+        isSlaBreach: Boolean(n.is_sla_breach),
+        driverId: n.driver_id ?? undefined,
+        truckCode: n.truck_code ?? undefined,
+      }));
+    }
+  } catch {
+    // Tables may not exist yet; continue with seeded in-memory data
+  }
+}
 
 // Server-Sent Events (SSE) connections registry
 interface SseClient {
@@ -574,20 +927,329 @@ setInterval(() => {
   });
 }, 20000);
 
-// --- DRIVER TELEMETRY & GATEWAY ACTION ENDPOINTS ---
+// --- AUTHENTICATION ENDPOINTS ---
+
+app.get('/api/auth/setup-status', (_req, res) => {
+  res.json({
+    success: true,
+    officialConfigured: Boolean(process.env.OFFICIAL_ACCESS_PASSCODE || claimedRolePasscodes.OFFICIAL),
+    driverConfigured: Boolean(process.env.DRIVER_ACCESS_PASSCODE || claimedRolePasscodes.DRIVER),
+    supabaseConfigured: Boolean(supabase),
+  });
+});
+
+app.post('/api/auth/resident/register', async (req, res) => {
+  const { fullName, streetAddress, homeBarangayId, mobileNumber, password } = req.body || {};
+  if (
+    typeof fullName !== 'string' ||
+    typeof streetAddress !== 'string' ||
+    typeof homeBarangayId !== 'string' ||
+    typeof mobileNumber !== 'string' ||
+    typeof password !== 'string'
+  ) {
+    return res.status(400).json({ success: false, message: 'All registration fields are required.' });
+  }
+
+  const normalized = normalizeMobile(mobileNumber);
+  if (normalized.length < 10) {
+    return res.status(400).json({ success: false, message: 'Please enter a valid 11-digit mobile number.' });
+  }
+  if (password.trim().length < 4) {
+    return res.status(400).json({ success: false, message: 'Password must be at least 4 characters.' });
+  }
+
+  const existing = residentAccounts.find((r) => r.normalizedMobile === normalized);
+  if (existing) {
+    return res.status(409).json({
+      success: false,
+      message: 'This mobile number is already registered. Please switch to Returning Resident Sign In.',
+    });
+  }
+
+  const targetBrgy = barangays.find((b) => b.id === homeBarangayId);
+  if (!targetBrgy) {
+    return res.status(400).json({ success: false, message: 'Please choose a valid Quezon City barangay.' });
+  }
+
+  const newResident: ResidentRecord = {
+    id: `resident-${crypto.randomUUID()}`,
+    fullName: fullName.trim(),
+    address: `${streetAddress.trim()}, Brgy. ${targetBrgy.name}, Quezon City`,
+    mobileNumber: mobileNumber.trim(),
+    normalizedMobile: normalized,
+    homeBarangayId,
+    subscribedBarangayIds: [homeBarangayId],
+    passwordHash: hashPassword(password.trim()),
+    createdAt: new Date().toISOString(),
+  };
+
+  residentAccounts.push(newResident);
+
+  if (supabase) {
+    try {
+      await supabase.from('residents').insert({
+        id: newResident.id,
+        full_name: newResident.fullName,
+        address: newResident.address,
+        mobile_number: newResident.mobileNumber,
+        home_barangay_id: newResident.homeBarangayId,
+        subscribed_barangay_ids: newResident.subscribedBarangayIds,
+        password_hash: newResident.passwordHash,
+        created_at: newResident.createdAt,
+      });
+    } catch {
+      // Fall back safely if Supabase table not created yet
+    }
+  }
+
+  const token = createSessionToken(newResident.id, 'RESIDENT');
+  const { passwordHash: _ph, normalizedMobile: _nm, ...publicUser } = newResident;
+  res.status(201).json({
+    success: true,
+    token,
+    session: { role: 'RESIDENT', user: publicUser },
+  });
+});
+
+app.post('/api/auth/resident/login', (req, res) => {
+  const { mobileNumber, password } = req.body || {};
+  if (typeof mobileNumber !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ success: false, message: 'Mobile number and password are required.' });
+  }
+
+  const normalized = normalizeMobile(mobileNumber);
+  const found = residentAccounts.find((r) => r.normalizedMobile === normalized);
+  if (!found || !verifyPasswordHash(password.trim(), found.passwordHash)) {
+    return res.status(401).json({
+      success: false,
+      message: 'Incorrect mobile number or password. Register first if you do not have an account yet.',
+    });
+  }
+
+  const token = createSessionToken(found.id, 'RESIDENT');
+  const { passwordHash: _ph, normalizedMobile: _nm, ...publicUser } = found;
+  res.json({
+    success: true,
+    token,
+    session: { role: 'RESIDENT', user: publicUser },
+  });
+});
+
+app.post('/api/resident/subscriptions', requireAuth(['RESIDENT']), async (req: AuthenticatedRequest, res) => {
+  const { barangayId } = req.body || {};
+  if (typeof barangayId !== 'string' || !barangays.some((b) => b.id === barangayId)) {
+    return res.status(400).json({ success: false, message: 'Invalid barangay ID.' });
+  }
+
+  const resident = residentAccounts.find((r) => r.id === req.auth!.userId);
+  if (!resident) {
+    return res.status(404).json({ success: false, message: 'Resident account not found.' });
+  }
+
+  const alreadySubscribed = resident.subscribedBarangayIds.includes(barangayId);
+  resident.subscribedBarangayIds = alreadySubscribed
+    ? resident.subscribedBarangayIds.filter((id) => id !== barangayId)
+    : [...resident.subscribedBarangayIds, barangayId];
+
+  if (supabase) {
+    try {
+      await supabase
+        .from('residents')
+        .update({ subscribed_barangay_ids: resident.subscribedBarangayIds })
+        .eq('id', resident.id);
+    } catch {
+      // Ignore if table not created yet
+    }
+  }
+
+  res.json({
+    success: true,
+    subscribedBarangayIds: resident.subscribedBarangayIds,
+  });
+});
+
+app.post('/api/auth/official/claim', async (req, res) => {
+  if (process.env.OFFICIAL_ACCESS_PASSCODE || claimedRolePasscodes.OFFICIAL) {
+    return res.status(409).json({
+      success: false,
+      message: 'City Official passcode has already been set up. Please sign in normally.',
+    });
+  }
+
+  const { employeeId, badgeNumber, passcode } = req.body || {};
+  if (typeof employeeId !== 'string' || typeof badgeNumber !== 'string' || typeof passcode !== 'string') {
+    return res.status(400).json({ success: false, message: 'Employee ID, Badge Number, and Passcode are required.' });
+  }
+  if (passcode.trim().length < 6) {
+    return res.status(400).json({ success: false, message: 'Passcode must be at least 6 characters.' });
+  }
+
+  const official = AUTHORIZED_OFFICIALS.find(
+    (o) =>
+      o.employeeId.toLowerCase() === employeeId.trim().toLowerCase() &&
+      o.badgeNumber.toLowerCase() === badgeNumber.trim().toLowerCase()
+  );
+
+  if (!official) {
+    return res.status(401).json({
+      success: false,
+      message: 'Employee ID and Badge Number do not match an authorized EPWMD official.',
+    });
+  }
+
+  const hash = hashPassword(passcode.trim());
+  claimedRolePasscodes.OFFICIAL = hash;
+
+  if (supabase) {
+    try {
+      await supabase.from('role_credentials').upsert({ role: 'OFFICIAL', passcode_hash: hash });
+    } catch {
+      // Ignore if table not created yet
+    }
+  }
+
+  const token = createSessionToken(official.id, 'OFFICIAL');
+  res.json({ success: true, token, session: { role: 'OFFICIAL', user: official } });
+});
+
+app.post('/api/auth/official/login', (req, res) => {
+  const { employeeId, badgeNumber, passcode } = req.body || {};
+  if (typeof employeeId !== 'string' || typeof badgeNumber !== 'string' || typeof passcode !== 'string') {
+    return res.status(400).json({ success: false, message: 'Employee ID, Badge Number, and Passcode are required.' });
+  }
+
+  const envPasscode = process.env.OFFICIAL_ACCESS_PASSCODE;
+  const claimedHash = claimedRolePasscodes.OFFICIAL;
+
+  if (!envPasscode && !claimedHash) {
+    return res.status(403).json({
+      success: false,
+      message: 'City Official passcode is not set up yet. Please complete first-time setup.',
+    });
+  }
+
+  const official = AUTHORIZED_OFFICIALS.find(
+    (o) =>
+      o.employeeId.toLowerCase() === employeeId.trim().toLowerCase() &&
+      o.badgeNumber.toLowerCase() === badgeNumber.trim().toLowerCase()
+  );
+
+  const passcodeMatches = envPasscode
+    ? verifyPlainConstantTime(passcode.trim(), envPasscode)
+    : claimedHash
+    ? verifyPasswordHash(passcode.trim(), claimedHash)
+    : false;
+
+  if (!official || !passcodeMatches) {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid Employee ID, Badge Number, or Passcode.',
+    });
+  }
+
+  const token = createSessionToken(official.id, 'OFFICIAL');
+  res.json({ success: true, token, session: { role: 'OFFICIAL', user: official } });
+});
+
+app.post('/api/auth/driver/claim', async (req, res) => {
+  if (process.env.DRIVER_ACCESS_PASSCODE || claimedRolePasscodes.DRIVER) {
+    return res.status(409).json({
+      success: false,
+      message: 'Driver PIN has already been set up. Please sign in normally.',
+    });
+  }
+
+  const { employeeId, truckCode, pin } = req.body || {};
+  if (typeof employeeId !== 'string' || typeof truckCode !== 'string' || typeof pin !== 'string') {
+    return res.status(400).json({ success: false, message: 'Driver ID, Truck Code, and PIN are required.' });
+  }
+  if (pin.trim().length < 4) {
+    return res.status(400).json({ success: false, message: 'Driver PIN must be at least 4 characters.' });
+  }
+
+  const driver = drivers.find(
+    (d) =>
+      d.employeeId.toLowerCase() === employeeId.trim().toLowerCase() &&
+      d.truckCode.toLowerCase() === truckCode.trim().toLowerCase()
+  );
+
+  if (!driver) {
+    return res.status(401).json({
+      success: false,
+      message: 'Driver Employee ID and Truck Code do not match an assigned truck.',
+    });
+  }
+
+  const hash = hashPassword(pin.trim());
+  claimedRolePasscodes.DRIVER = hash;
+
+  if (supabase) {
+    try {
+      await supabase.from('role_credentials').upsert({ role: 'DRIVER', passcode_hash: hash });
+    } catch {
+      // Ignore if table not created yet
+    }
+  }
+
+  const token = createSessionToken(driver.id, 'DRIVER');
+  res.json({ success: true, token, session: { role: 'DRIVER', user: driver } });
+});
+
+app.post('/api/auth/driver/login', (req, res) => {
+  const { employeeId, truckCode, pin } = req.body || {};
+  if (typeof employeeId !== 'string' || typeof truckCode !== 'string' || typeof pin !== 'string') {
+    return res.status(400).json({ success: false, message: 'Driver ID, Truck Code, and PIN are required.' });
+  }
+
+  const envPin = process.env.DRIVER_ACCESS_PASSCODE;
+  const claimedHash = claimedRolePasscodes.DRIVER;
+
+  if (!envPin && !claimedHash) {
+    return res.status(403).json({
+      success: false,
+      message: 'Driver access PIN is not set up yet. Please complete first-time setup.',
+    });
+  }
+
+  const driver = drivers.find(
+    (d) =>
+      d.employeeId.toLowerCase() === employeeId.trim().toLowerCase() &&
+      d.truckCode.toLowerCase() === truckCode.trim().toLowerCase()
+  );
+
+  const pinMatches = envPin
+    ? verifyPlainConstantTime(pin.trim(), envPin)
+    : claimedHash
+    ? verifyPasswordHash(pin.trim(), claimedHash)
+    : false;
+
+  if (!driver || !pinMatches) {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid Driver Employee ID, Truck Code, or PIN.',
+    });
+  }
+
+  const token = createSessionToken(driver.id, 'DRIVER');
+  res.json({ success: true, token, session: { role: 'DRIVER', user: driver } });
+});
+
+// --- DRIVER ACTION ENDPOINTS ---
 
 // 1. Get all fleet drivers
-app.get('/api/drivers', (req, res) => {
+app.get('/api/drivers', (_req, res) => {
   res.json({ success: true, count: drivers.length, data: drivers });
 });
 
-// 2. Driver "ARRIVE" Gateway Action (Registers corridor check-in)
-app.post('/api/driver/arrive', (req, res) => {
-  const { driverId, barangayId } = req.body;
-  const driverIndex = drivers.findIndex((d) => d.id === driverId || d.assignedBarangayId === barangayId);
+// 2. Driver "ARRIVE" Action
+app.post('/api/driver/arrive', requireAuth(['DRIVER']), (req: AuthenticatedRequest, res) => {
+  const { driverId, barangayId } = req.body || {};
+  const driverIndex = drivers.findIndex(
+    (d) => d.id === req.auth!.userId && (d.id === driverId || d.assignedBarangayId === barangayId)
+  );
 
   if (driverIndex === -1) {
-    return res.status(404).json({ success: false, message: 'Driver not found' });
+    return res.status(403).json({ success: false, message: 'Driver authorization mismatch.' });
   }
 
   const driver = drivers[driverIndex];
@@ -619,6 +1281,8 @@ app.post('/api/driver/arrive', (req, res) => {
   };
 
   notifications = [arrivalNotif, ...notifications];
+  if (brgyIndex !== -1) syncSupabaseBarangay(barangays[brgyIndex]);
+  syncSupabaseNotification(arrivalNotif);
 
   adminAuditLogs = [
     {
@@ -647,12 +1311,12 @@ app.post('/api/driver/arrive', (req, res) => {
 });
 
 // 3. Driver Manual / Auto ETA Input
-app.post('/api/driver/eta', (req, res) => {
-  const { driverId, etaMinutes, etaFormatted } = req.body;
-  const driverIndex = drivers.findIndex((d) => d.id === driverId);
+app.post('/api/driver/eta', requireAuth(['DRIVER']), (req: AuthenticatedRequest, res) => {
+  const { driverId, etaMinutes, etaFormatted } = req.body || {};
+  const driverIndex = drivers.findIndex((d) => d.id === req.auth!.userId && (!driverId || d.id === driverId));
 
   if (driverIndex === -1) {
-    return res.status(404).json({ success: false, message: 'Driver not found' });
+    return res.status(403).json({ success: false, message: 'Driver authorization mismatch.' });
   }
 
   const driver = drivers[driverIndex];
@@ -688,6 +1352,8 @@ app.post('/api/driver/eta', (req, res) => {
   };
 
   notifications = [etaUpdateNotif, ...notifications];
+  if (brgyIndex !== -1) syncSupabaseBarangay(barangays[brgyIndex]);
+  syncSupabaseNotification(etaUpdateNotif);
 
   broadcastSse('DRIVER_ETA_UPDATED', { driver, etaMinutes: mins });
   broadcastSse('NOTIFICATION', etaUpdateNotif);
@@ -702,12 +1368,12 @@ app.post('/api/driver/eta', (req, res) => {
 });
 
 // 4. Driver Incident / Delay Trigger
-app.post('/api/driver/incident', (req, res) => {
-  const { driverId, cause, category, rescheduledTime, advisory } = req.body;
-  const driverIndex = drivers.findIndex((d) => d.id === driverId);
+app.post('/api/driver/incident', requireAuth(['DRIVER']), (req: AuthenticatedRequest, res) => {
+  const { driverId, cause, category, rescheduledTime, advisory } = req.body || {};
+  const driverIndex = drivers.findIndex((d) => d.id === req.auth!.userId && (!driverId || d.id === driverId));
 
   if (driverIndex === -1) {
-    return res.status(404).json({ success: false, message: 'Driver not found' });
+    return res.status(403).json({ success: false, message: 'Driver authorization mismatch.' });
   }
 
   const driver = drivers[driverIndex];
@@ -750,6 +1416,8 @@ app.post('/api/driver/incident', (req, res) => {
   };
 
   notifications = [delayNotif, ...notifications];
+  if (brgyIndex !== -1) syncSupabaseBarangay(barangays[brgyIndex]);
+  syncSupabaseNotification(delayNotif);
 
   broadcastSse('DRIVER_INCIDENT', { driver, delayNotif });
   broadcastSse('NOTIFICATION', delayNotif);
@@ -859,12 +1527,12 @@ app.get('/api/notifications', (req, res) => {
 });
 
 // 4. Get audit logs
-app.get('/api/admin/audit-logs', (req, res) => {
+app.get('/api/admin/audit-logs', requireAuth(['OFFICIAL']), (_req, res) => {
   res.json({ success: true, count: adminAuditLogs.length, data: adminAuditLogs });
 });
 
 // 5. Update barangay schedule (Admin endpoint)
-app.put('/api/admin/barangays/:id/schedule', (req, res) => {
+app.put('/api/admin/barangays/:id/schedule', requireAuth(['OFFICIAL']), (req, res) => {
   const { id } = req.params;
   const {
     regularDays,
@@ -914,6 +1582,8 @@ app.put('/api/admin/barangays/:id/schedule', (req, res) => {
   };
 
   notifications = [scheduleUpdateNotif, ...notifications];
+  syncSupabaseBarangay(barangays[brgyIndex]);
+  syncSupabaseNotification(scheduleUpdateNotif);
 
   // Log audit
   adminAuditLogs = [
@@ -937,7 +1607,7 @@ app.put('/api/admin/barangays/:id/schedule', (req, res) => {
 });
 
 // 6. Input delay reasons & propagate delay alert (Admin endpoint)
-app.post('/api/admin/barangays/:id/delay', (req, res) => {
+app.post('/api/admin/barangays/:id/delay', requireAuth(['OFFICIAL']), (req, res) => {
   const { id } = req.params;
   const {
     causeOfDelay,
@@ -1003,6 +1673,8 @@ app.post('/api/admin/barangays/:id/delay', (req, res) => {
   };
 
   notifications = [delayNotif, ...notifications];
+  syncSupabaseBarangay(barangays[brgyIndex]);
+  syncSupabaseNotification(delayNotif);
 
   // Log audit
   adminAuditLogs = [
@@ -1030,7 +1702,7 @@ app.post('/api/admin/barangays/:id/delay', (req, res) => {
 });
 
 // 7. Resolve delay and resume normal schedule (Admin endpoint)
-app.post('/api/admin/barangays/:id/resolve-delay', (req, res) => {
+app.post('/api/admin/barangays/:id/resolve-delay', requireAuth(['OFFICIAL']), (req, res) => {
   const { id } = req.params;
   const { adminOfficialName, nextDate, nextTime, resolutionNote } = req.body;
 
@@ -1067,6 +1739,8 @@ app.post('/api/admin/barangays/:id/resolve-delay', (req, res) => {
   };
 
   notifications = [resolvedNotif, ...notifications];
+  syncSupabaseBarangay(barangays[brgyIndex]);
+  syncSupabaseNotification(resolvedNotif);
 
   adminAuditLogs = [
     {
@@ -1093,7 +1767,7 @@ app.post('/api/admin/barangays/:id/resolve-delay', (req, res) => {
 });
 
 // 8. Admin ETA Override Endpoint
-app.post('/api/admin/barangays/:id/override-eta', (req, res) => {
+app.post('/api/admin/barangays/:id/override-eta', requireAuth(['OFFICIAL']), (req, res) => {
   const { id } = req.params;
   const { newEtaTime, adminOfficialName, reason } = req.body;
   const brgyIndex = barangays.findIndex((b) => b.id === id);
@@ -1122,6 +1796,8 @@ app.post('/api/admin/barangays/:id/override-eta', (req, res) => {
   };
 
   notifications = [overrideNotif, ...notifications];
+  syncSupabaseBarangay(existing);
+  syncSupabaseNotification(overrideNotif);
 
   broadcastSse('NOTIFICATION', overrideNotif);
   broadcastSse('DATA_SYNC', { barangays, notifications, drivers });
@@ -1131,6 +1807,8 @@ app.post('/api/admin/barangays/:id/override-eta', (req, res) => {
 
 // Start server with Vite middleware in dev or static files in prod
 async function startServer() {
+  await hydrateFromSupabase();
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
